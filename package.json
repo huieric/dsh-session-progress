@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-progress",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Show the latest progress lines (thinking, commands, output) in the DSH sidebar session hover card, with wrapping and live refresh.",
   "type": "module",
   "main": "lib/index.js",
