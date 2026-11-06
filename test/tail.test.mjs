@@ -7,10 +7,11 @@ import {
   describeSessionProgress,
   describeToolCall,
   normalizeLimit,
+  tidy,
 } from '../lib/tail.js'
 
-test('clip collapses whitespace and cuts on code points', () => {
-  assert.equal(clip('  a \n\n b  '), 'a b')
+test('clip cuts single-line text on code points', () => {
+  assert.equal(clip('hello', 10), 'hello')
   assert.equal(clip(''), '')
   assert.equal(clip('abcdef', 4), 'abc…')
   // Astral characters must not be split into half a surrogate pair.
@@ -18,6 +19,17 @@ test('clip collapses whitespace and cuts on code points', () => {
   const cut = clip(emoji, 3)
   assert.equal(Array.from(cut).length, 3)
   assert.ok(cut.endsWith('…'))
+})
+
+test('tidy keeps newlines and only ellipsizes real overflow', () => {
+  assert.equal(tidy('  a \n\n\n b  '), 'a\n\n b')
+  assert.equal(tidy('one\ntwo\nthree'), 'one\ntwo\nthree')
+  assert.equal(tidy('line'.repeat(100), 40), `${'line'.repeat(9)}lin…`)
+  assert.equal(tidy('a\nb\nc\nd', 500, 2), 'a\nb…')
+  assert.equal(tidy('   \n \n'), '')
+  // A path longer than the old 120-char cap must survive intact.
+  const longPath = `/home/zhujinhui/${'deep-directory/'.repeat(12)}file.txt`
+  assert.equal(tidy(longPath, 400), longPath)
 })
 
 test('LINE_KINDS covers every kind the Host emits', () => {
@@ -31,6 +43,9 @@ test('describeToolCall prefers the shell command, then the path', () => {
   assert.equal(describeToolCall('mystery', '{"other":"value"}'), 'value')
   assert.equal(describeToolCall('mystery', 'not json at all'), 'not json at all')
   assert.equal(describeToolCall('noargs', ''), 'noargs()')
+  // The old 120-character cap cut ordinary commands; the card wraps instead.
+  const long = `cd /home/zhujinhui/laurel && ${'sleep 5; '.repeat(20)}echo done`
+  assert.equal(describeToolCall('bash', JSON.stringify({ command: long })), long)
 })
 
 test('describeSessionProgress maps event types onto line kinds', () => {
@@ -50,7 +65,8 @@ test('describeSessionProgress maps event types onto line kinds', () => {
   assert.deepEqual(lines.map((line) => line.kind), ['user', 'thinking', 'command', 'output', 'answer'])
   assert.equal(lines[2].text, 'ls .dsh/sessions')
   assert.equal(lines[2].tool, 'bash')
-  assert.equal(lines[3].text, 'session-a session-b')
+  // Tool output keeps its own line breaks so the card can show it in full.
+  assert.equal(lines[3].text, 'session-a\nsession-b')
 })
 
 test('describeSessionProgress keeps the newest lines and clamps the limit', () => {
@@ -65,6 +81,18 @@ test('describeSessionProgress keeps the newest lines and clamps the limit', () =
   assert.equal(normalizeLimit('99'), 8)
   assert.equal(normalizeLimit('0'), 1)
   assert.equal(normalizeLimit('abc'), 4)
+})
+
+test('describeSessionProgress reads the v4 user message shape', () => {
+  // v4 puts role/content/id straight on the event data, without a `message`.
+  const lines = describeSessionProgress([
+    { type: 'user/message', data: { role: 'user', id: 'm1', content: [
+      { type: 'image', attachment: { attachmentId: 'sha256:x' } },
+      { type: 'text', text: '看一下这个目录' },
+    ] } },
+    { type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'text', text: '好的' }] } } },
+  ], { limit: 4 })
+  assert.deepEqual(lines.map((line) => [line.kind, line.text]), [['user', '看一下这个目录'], ['answer', '好的']])
 })
 
 test('describeSessionProgress ignores malformed events', () => {

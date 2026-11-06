@@ -7,11 +7,15 @@ import { zstdDecompressSync } from 'node:zlib'
 import { homedir } from 'node:os'
 
 import {
+  RUNNING_TTL_MS,
   TAIL_PATH,
+  apply,
   createCache,
   createRecorder,
   createTailHandler,
   describeTail,
+  eventStamp,
+  isRunning,
   loadTail,
 } from '../lib/index.js'
 
@@ -181,6 +185,55 @@ test('describeTail turns a stored session into card lines', async () => {
   assert.equal(payload.eventCount, 2)
 })
 
+test('isRunning tracks an open, recent turn', () => {
+  const now = 1_000_000
+  const open = [
+    { type: 'turn/start', time: now - 2_000 },
+    { type: 'assistant/message', time: now - 1_500 },
+  ]
+  assert.equal(isRunning(open, now), true)
+  assert.equal(isRunning([...open, { type: 'turn/end', time: now - 1_000 }], now), false)
+  // An interrupted run must not look live forever.
+  assert.equal(isRunning(open, now + RUNNING_TTL_MS + 1), false)
+  assert.equal(isRunning([], now), false)
+})
+
+test('describeTail reports whether the turn is still running', async () => {
+  const now = 5_000_000
+  const events = [
+    { type: 'turn/start', seq: 1, time: now - 3_000 },
+    { type: 'user/message', seq: 2, time: now - 2_500, data: { message: { content: [{ type: 'text', text: '跑一下' }] } } },
+    { type: 'assistant/message', seq: 3, time: now - 2_000, data: { message: { content: [{ type: 'reasoning', text: '正在跑' }] } } },
+  ]
+  const ctx = fakeCtx({
+    sessions: { get: () => undefined },
+    sessionPersistence: {
+      stat: async () => ({ eventCount: 3 }),
+      open: async () => ({ read: async () => ({ events }), close: async () => {} }),
+    },
+  })
+  const live = await describeTail(ctx, 'session-run', 4, { now })
+  assert.equal(live.running, true)
+  assert.equal(live.updatedAt, now - 2_000)
+  const finished = await describeTail(ctx, 'session-run', 4, { now: now + RUNNING_TTL_MS + 10_000 })
+  assert.equal(finished.running, false)
+})
+
+test('eventStamp changes only when new events land', async () => {
+  let seq = 7
+  const ctx = fakeCtx({ sessions: { get: () => ({ seq, snapshotEvents: () => [] }) } })
+  assert.equal(await eventStamp(ctx, 'session-1'), 'live:7')
+  seq = 9
+  assert.equal(await eventStamp(ctx, 'session-1'), 'live:9')
+
+  const stored = fakeCtx({
+    sessions: { get: () => undefined },
+    sessionPersistence: { stat: async () => ({ eventCount: 12 }) },
+  })
+  assert.equal(await eventStamp(stored, 'session-2'), 'stored:12')
+  assert.equal(await eventStamp(fakeCtx({ sessions: { get: () => undefined } }), 'session-3'), undefined)
+})
+
 test('cache serves repeated polls from memory', async () => {
   const cache = createCache(50)
   let produced = 0
@@ -226,16 +279,13 @@ test('apply registers the exact route inside an effect', () => {
       fn()
     },
   }
-  // apply() is imported lazily so the test does not depend on import order.
-  return import('../lib/index.js').then(({ apply }) => {
-    const handle = apply(ctx)
-    assert.equal(registered.length, 1)
-    assert.equal(registered[0].kind, 'exact')
-    assert.equal(registered[0].path, TAIL_PATH)
-    assert.equal(typeof registered[0].handler, 'function')
-    assert.deepEqual(effects, ['session-progress: hover tail route'])
-    assert.equal(handle.recorder.state.requests, 0)
-  })
+  const handle = apply(ctx)
+  assert.equal(registered.length, 1)
+  assert.equal(registered[0].kind, 'exact')
+  assert.equal(registered[0].path, TAIL_PATH)
+  assert.equal(typeof registered[0].handler, 'function')
+  assert.deepEqual(effects, ['session-progress: hover tail route'])
+  assert.equal(handle.recorder.state.requests, 0)
 })
 
 test('real session ledger produces sane lines', async (t) => {
@@ -277,6 +327,6 @@ test('real session ledger produces sane lines', async (t) => {
   assert.ok(payload.items.length > 0, 'expected at least one line from a real session')
   for (const item of payload.items) {
     assert.ok(['user', 'thinking', 'command', 'output', 'answer'].includes(item.kind))
-    assert.ok(item.text.length > 0 && item.text.length <= 141)
+    assert.ok(item.text.length > 0 && item.text.length <= 650)
   }
 })

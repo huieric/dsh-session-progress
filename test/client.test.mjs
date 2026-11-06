@@ -127,7 +127,11 @@ test('apply registers locale dictionaries and the hover slot', () => {
 
   assert.equal(document.styles.length, 1)
   assert.equal(document.styles[0].plugin, 'dsh-session-progress')
-  assert.match(document.styles[0].css, /\.dsp-hover__text\{[^}]*text-overflow:ellipsis/)
+  // Long lines wrap inside a widened card instead of ending in an ellipsis.
+  assert.match(document.styles[0].css, /\.dsp-hover__text\{[^}]*white-space:pre-wrap/)
+  assert.match(document.styles[0].css, /\.dsp-hover__text\{[^}]*overflow-wrap:anywhere/)
+  assert.ok(!document.styles[0].css.includes('text-overflow:ellipsis'))
+  assert.match(document.styles[0].css, /div:has\(> div > div > \.dsp-hover\)\{width:372px/)
 })
 
 test('CSS is injected only once', () => {
@@ -141,6 +145,22 @@ test('CSS is injected only once', () => {
   client.apply(ctx)
   client.apply(ctx)
   assert.equal(document.styles.length, 1)
+})
+
+test('renderLines marks the newest line while the session is running', () => {
+  const { client } = loadClient()
+  const items = [
+    { kind: 'command', text: 'npm test' },
+    { kind: 'output', text: 'pass 28\nfail 0' },
+  ]
+  const live = renderToStaticMarkup(client.renderLines(items, (key) => client.DICT.zh[key], true))
+  assert.match(live, /dsp-hover--live/)
+  assert.match(live, /dsp-hover__caret/)
+  // Only the newest row is flagged fresh; the older row must not re-animate.
+  assert.equal((live.match(/dsp-hover__row--fresh/g) ?? []).length, 1)
+  const idle = renderToStaticMarkup(client.renderLines(items, (key) => client.DICT.zh[key], false))
+  assert.ok(!idle.includes('dsp-hover__caret'))
+  assert.ok(!idle.includes('dsp-hover--live'))
 })
 
 test('renderLines draws labelled rows and hides itself when empty', () => {
@@ -187,27 +207,31 @@ test('createPoller fetches immediately, polls, and stops on demand', async () =>
   const calls = []
   let intervalCallback
   let cleared = null
+  let delay = null
   const poller = loadClient().client.createPoller({
     sessionId: 'session-42',
     interval: 1000,
+    liveInterval: 600,
     fetchImpl: async (url) => {
       calls.push(url)
       return {
         ok: true,
-        json: async () => ({ ok: true, items: [{ kind: 'command', text: 'ls' }, { kind: 'answer', text: 'done' }] }),
+        json: async () => ({ ok: true, running: false, items: [{ kind: 'command', text: 'ls' }, { kind: 'answer', text: 'done' }] }),
       }
     },
-    setIntervalImpl: (fn) => {
+    setIntervalImpl: (fn, ms) => {
       intervalCallback = fn
+      delay = ms
       return 7
     },
     clearIntervalImpl: (id) => { cleared = id },
-    onItems: (items) => { calls.push(['items', items.map((item) => item.kind).join(',')]) },
+    onState: (items, live) => { calls.push(['state', items.map((item) => item.kind).join(','), live]) },
   })
 
   await new Promise((resolve) => setTimeout(resolve, 5))
   assert.equal(calls[0], '/dsh-session-progress/tail?session=session-42&limit=4')
-  assert.deepEqual(calls[1], ['items', 'command,answer'])
+  assert.deepEqual(calls[1], ['state', 'command,answer', false])
+  assert.equal(delay, 1000, 'idle sessions keep the relaxed cadence')
 
   intervalCallback()
   await new Promise((resolve) => setTimeout(resolve, 5))
@@ -220,6 +244,37 @@ test('createPoller fetches immediately, polls, and stops on demand', async () =>
   poller.tick()
   await new Promise((resolve) => setTimeout(resolve, 5))
   assert.equal(calls.length, 4, 'a stopped poller must not fetch again')
+})
+
+test('createPoller tightens its cadence while the turn is running', async () => {
+  let delay = null
+  let running = true
+  const cleared = []
+  const client = loadClient().client
+  const poller = client.createPoller({
+    sessionId: 'session-live',
+    interval: 1800,
+    liveInterval: 600,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, running, items: [{ kind: 'thinking', text: 'working' }] }) }),
+    setIntervalImpl: (_fn, ms) => {
+      delay = ms
+      return 11
+    },
+    clearIntervalImpl: (id) => { cleared.push(id) },
+    onState: () => {},
+  })
+
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.equal(delay, 600, 'a running session polls fast')
+  assert.equal(poller.live, true)
+
+  running = false
+  await poller.tick()
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.equal(delay, 1800, 'an idle session relaxes again')
+  assert.equal(poller.live, false)
+  assert.equal(cleared.length, 2)
+  poller.stop()
 })
 
 test('createPoller gives up after consecutive failures', async () => {
@@ -267,6 +322,7 @@ test('hover component renders live progress from the route', async () => {
       ok: true,
       json: async () => ({
         ok: true,
+        running: true,
         items: [
           { kind: 'thinking', text: '先看日志' },
           { kind: 'command', text: 'wc -l session.v4.jsonl.zstd' },
@@ -290,6 +346,9 @@ test('hover component renders live progress from the route', async () => {
     assert.match(json, /思考/)
     assert.match(json, /wc -l session\.v4\.jsonl\.zstd/)
     assert.match(json, /2055/)
+    // A running session shows the live caret at the end of the newest line.
+    assert.match(json, /dsp-hover__caret/)
+    assert.match(json, /dsp-hover--live/)
   } finally {
     await act(async () => { renderer?.unmount() })
     globalThis.fetch = originalFetch

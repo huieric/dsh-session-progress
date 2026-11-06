@@ -1,7 +1,7 @@
 {
   "name": "dsh-session-progress",
-  "version": "0.1.0",
-  "description": "Show the last few lines of progress (thinking, commands, output, replies) inside the DSH sidebar session hover card.",
+  "version": "0.2.1",
+  "description": "Show the latest progress lines (thinking, commands, output) in the DSH sidebar session hover card, with wrapping and live refresh.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -38,7 +38,7 @@
     "dsh-plugin",
     "deepseek-harness",
     "hover-card",
-    "session-progress"
+    "session"
   ],
   "engines": {
     "node": ">=20"
